@@ -126,3 +126,130 @@
     
     (ok true)))
 
+;; Helper functions for enum conversions
+
+(define-private (get-market-status-buff (status (buff 1)))
+  status)
+
+(define-private (get-outcome-type-buff (type (buff 1)))
+  type)
+
+(define-private (get-oracle-status-buff (status (buff 1)))
+  status)
+
+(define-private (get-dispute-status-buff (status (buff 1)))
+  status)
+
+;; Get market details
+(define-read-only (get-market (market-id uint))
+  (map-get? markets market-id))
+
+;; Get market outcome pool
+(define-read-only (get-outcome-pool (market-id uint) (outcome (string-ascii 50)))
+  (map-get? liquidity-pools { market-id: market-id, outcome: outcome }))
+
+;; Get user position
+(define-read-only (get-user-position (market-id uint) (user principal) (outcome (string-ascii 50)))
+  (map-get? positions { market-id: market-id, user: user, outcome: outcome }))
+
+;; Get oracle details
+(define-read-only (get-oracle (oracle-address principal))
+  (map-get? oracles oracle-address))
+
+;; Get market odds for an outcome
+(define-read-only (get-market-odds (market-id uint) (outcome (string-ascii 50)))
+  (let ((market (map-get? markets market-id))
+        (pool (map-get? liquidity-pools { market-id: market-id, outcome: outcome })))
+    (match market
+      market-data (match pool
+                    pool-data (let ((outcome-amount (get amount pool-data))
+                                   (total-liquidity (get total-liquidity market-data)))
+                                (if (> total-liquidity u0)
+                                  (ok (/ (* outcome-amount u1000) total-liquidity))
+                                  (ok u0)))
+                    (err error-invalid-market))
+      (err error-invalid-market))))
+
+;; Get dispute details
+(define-read-only (get-dispute (market-id uint))
+  (map-get? disputes market-id))
+
+;; Get market analytics
+(define-read-only (get-market-analytics (market-id uint))
+  (map-get? market-analytics market-id))
+
+
+;; Calculate potential winnings
+(define-read-only (calculate-potential-winnings (market-id uint) (outcome (string-ascii 50)) (amount uint))
+  (let ((market (map-get? markets market-id))
+        (pool (map-get? liquidity-pools { market-id: market-id, outcome: outcome })))
+    (match market
+      market-data (match pool
+                    pool-data (let ((outcome-amount (get amount pool-data))
+                                   (total-liquidity (get total-liquidity market-data))
+                                   (market-fee-amount (/ (* total-liquidity (get market-fee market-data)) u1000))
+                                   (oracle-fee-amount (/ (* total-liquidity (get oracle-fee market-data)) u1000))
+                                   (winnings-pool (- total-liquidity (+ market-fee-amount oracle-fee-amount))))
+                                (if (> outcome-amount u0)
+                                  (ok (/ (* winnings-pool amount) outcome-amount))
+                                  (ok u0)))
+                    (err error-invalid-market))
+      (err error-invalid-market))))
+
+
+;; Helper function to calculate positions value
+(define-private (calculate-positions-value (outcome (string-ascii 50)) (acc { user: principal, market-id: uint, total-value: uint }))
+  (let ((position (default-to { amount: u0, claimed: false } 
+                   (map-get? positions { market-id: (get market-id acc), user: (get user acc), outcome: outcome }))))
+    { 
+      user: (get user acc),
+      market-id: (get market-id acc),
+      total-value: (+ (get total-value acc) (get amount position))
+    }))
+
+(define-data-var protocol-paused bool false)
+
+(define-public (pause-protocol)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) error-unauthorized)
+    (var-set protocol-paused true)
+    (ok true)))
+
+(define-public (unpause-protocol)
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) error-unauthorized)
+    (var-set protocol-paused false)
+    (ok true)))
+
+(define-data-var protocol-fee-collector principal contract-owner)
+
+(define-public (set-fee-collector (new-collector principal))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) error-unauthorized)
+    (var-set protocol-fee-collector new-collector)
+    (ok true)))
+
+(define-data-var max-liquidity-per-market uint u1000000000000) ;; 1 million STX max per market
+
+(define-public (set-max-liquidity (max-amount uint))
+  (begin
+    (asserts! (is-eq tx-sender contract-owner) error-unauthorized)
+    (var-set max-liquidity-per-market max-amount)
+    (ok true)))
+
+(define-public (withdraw-oracle-stake (amount uint))
+  (let ((oracle (unwrap! (map-get? oracles tx-sender) error-not-oracle))
+        (current-stake (get stake oracle))
+        (remaining-stake (- current-stake amount)))
+    
+    ;; Ensure minimum stake remains
+    (asserts! (>= remaining-stake min-stake) error-invalid-amount)
+    
+    ;; Transfer stake back to oracle
+    (as-contract (try! (stx-transfer? amount tx-sender tx-sender)))
+    
+    ;; Update oracle stake
+    (map-set oracles tx-sender
+      (merge oracle { stake: remaining-stake }))
+    
+    (ok true)))
